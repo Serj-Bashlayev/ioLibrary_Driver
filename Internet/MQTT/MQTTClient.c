@@ -33,7 +33,8 @@ static int sendPacket(MQTTClient* c, int length, Timer* timer)
 
     while (sent < length && !TimerIsExpired(timer))
     {
-        rc = c->ipstack->mqttwrite(c->ipstack, &c->buf[sent], length, TimerLeftMS(timer));
+        // Fixed sendPacket() couldn't send packets larger than 2048 bytes and caused a disconnect from server
+        rc = c->ipstack->mqttwrite(c->ipstack, &c->buf[sent], length - sent, TimerLeftMS(timer));
         if (rc < 0)  // there was an error writing the data
             break;
         sent += rc;
@@ -128,34 +129,151 @@ exit:
 }
 
 
+/*************************************
+* Fully based on code from MQTTnet [MqttTopicFilterComparer.Compare]
+* https://github.com/dotnet/MQTTnet
+*************************************/
 // assume topic filter and name is in correct format
 // # can only be at end
 // + and # can only be next to separator
 static char isTopicMatched(char* topicFilter, MQTTString* topicName)
 {
-    char* curf = topicFilter;
-    char* curn = topicName->lenstring.data;
-    char* curn_end = curn + topicName->lenstring.len;
+    char* filterPointer = topicFilter;
+    char* topicPointer = topicName->lenstring.data;
+    int filterOffset = 0;
+    int filterLength = 0;
+    int topicOffset = 0;
+    int topicLength = topicName->lenstring.len;
 
-    while (*curf && curn < curn_end)
-    {
-        if (*curn == '/' && *curf != '/')
-            break;
-        if (*curf != '+' && *curf != '#' && *curf != *curn)
-            break;
-        if (*curf == '+')
-        {   // skip until we meet the next separator, or end of string
-            char* nextpos = curn + 1;
-            while (nextpos < curn_end && *nextpos != '/')
-                nextpos = ++curn + 1;
+    if (filterPointer == NULL || topicPointer == NULL || !*filterPointer || !*topicPointer || !topicLength)
+        return 0;
+
+    while (*topicFilter++)
+        filterLength++;
+
+    if (filterLength > topicLength) {
+        // It is impossible to create a filter which is longer than the actual topic.
+        // The only way this can happen is when the last char is a wildcard char.
+        // sensor/7/temperature >> sensor/7/temperature = Equal
+        // sensor/+/temperature >> sensor/7/temperature = Equal
+        // sensor/7/+           >> sensor/7/temperature = Shorter
+        // sensor/#             >> sensor/7/temperature = Shorter
+        char lastFilterChar = filterPointer[filterLength - 1];
+        if (lastFilterChar != '#' && lastFilterChar != '+') {
+            return 0;
         }
-        else if (*curf == '#')
-            curn = curn_end - 1;    // skip until end of string
-        curf++;
-        curn++;
-    };
+    }
 
-    return (curn == curn_end) && (*curf == '\0');
+    int isMultiLevelFilter = filterPointer[filterLength - 1] == '#';
+    int isReservedTopic = topicPointer[0] == '$';
+
+    if (isReservedTopic && filterLength == 1 && isMultiLevelFilter) {
+        // It is not allowed to receive i.e. '$foo/bar' with filter '#'.
+        return 0;
+    }
+
+    if (isReservedTopic && filterPointer[0] == '+') {
+        // It is not allowed to receive i.e. '$SYS/monitor/Clients' with filter '+/monitor/Clients'.
+        return 0;
+    }
+
+    if (filterLength == 1 && isMultiLevelFilter) {
+        // Filter '#' matches basically everything.
+        return 1;
+    }
+
+    // Go through the filter char by char.
+    while (filterOffset < filterLength && topicOffset < topicLength)
+    {
+        // Check if the current char is a multi level wildcard. The char is only allowed
+        // at the very las position.
+        if (filterPointer[filterOffset] == '#' && filterOffset != filterLength - 1) {
+            // FilterInvalid;
+            return 0;
+        }
+
+        if (filterPointer[filterOffset] == topicPointer[topicOffset]) {
+            if (topicOffset == topicLength - 1) {
+                // Check for e.g. "foo" matching "foo/#"
+                if (filterOffset == filterLength - 3 && filterPointer[filterOffset + 1] == '/' && isMultiLevelFilter) {
+                    return 1;
+                }
+
+                // Check for e.g. "foo/" matching "foo/#"
+                if (filterOffset == filterLength - 2 && filterPointer[filterOffset] == '/' && isMultiLevelFilter) {
+                    return 1;
+                }
+            }
+
+            filterOffset++;
+            topicOffset++;
+
+            // Check if the end was reached and i.e. "foo/bar" matches "foo/bar"
+            if (filterOffset == filterLength && topicOffset == topicLength) {
+                return 1;
+            }
+
+            int endOfTopic = topicOffset == topicLength;
+
+            if (endOfTopic && filterOffset == filterLength - 1 && filterPointer[filterOffset] == '+') {
+                if (filterOffset > 0 && filterPointer[filterOffset - 1] != '/') {
+                    // FilterInvalid;
+                    return 0;
+                }
+
+                return 1;
+            }
+        }
+        else {
+            if (filterPointer[filterOffset] == '+') {
+                // Check for invalid "+foo" or "a/+foo" subscription
+                if (filterOffset > 0 && filterPointer[filterOffset - 1] != '/') {
+                    // FilterInvalid;
+                    return 0;
+                }
+
+                // Check for bad "foo+" or "foo+/a" subscription
+                if (filterOffset < filterLength - 1 && filterPointer[filterOffset + 1] != '/') {
+                    // FilterInvalid;
+                    return 0;
+                }
+
+                filterOffset++;
+                while (topicOffset < topicLength && topicPointer[topicOffset] != '/')
+                {
+                    topicOffset++;
+                }
+
+                if (topicOffset == topicLength && filterOffset == filterLength) {
+                    return 1;
+                }
+            }
+            else if (filterPointer[filterOffset] == '#') {
+                if (filterOffset > 0 && filterPointer[filterOffset - 1] != '/') {
+                    // FilterInvalid;
+                    return 0;
+                }
+
+                if (filterOffset + 1 != filterLength) {
+                    // FilterInvalid;
+                    return 0;
+                }
+
+                return 1;
+            }
+            else {
+                // Check for e.g. "foo/bar" matching "foo/+/#".
+                if (filterOffset > 0 && filterOffset + 2 == filterLength && topicOffset == topicLength && filterPointer[filterOffset - 1] == '+' &&
+                    filterPointer[filterOffset] == '/' && isMultiLevelFilter) {
+                    return 1;
+                }
+
+                return 0;
+            }
+        }
+    }
+
+    return 0;
 }
 
 

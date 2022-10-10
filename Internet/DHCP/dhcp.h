@@ -72,6 +72,9 @@ extern "C" {
 
 #define DCHP_HOST_NAME           "WIZnet\0"
 
+#define OPT_SIZE                 312               /// Max OPT size of @ref RIP_MSG
+#define RIP_MSG_SIZE             (236+OPT_SIZE)    /// Max size of @ref RIP_MSG
+
 /* 
  * @brief return value of @ref DHCP_run()
  */
@@ -84,6 +87,27 @@ enum
    DHCP_IP_LEASED,   ///< Stand by 
    DHCP_STOPPED      ///< Stop processing DHCP protocol
 };
+
+/*
+ * @brief DHCP message format
+ */
+typedef struct {
+	uint8_t  op;            ///< @ref DHCP_BOOTREQUEST or @ref DHCP_BOOTREPLY
+	uint8_t  htype;         ///< @ref DHCP_HTYPE10MB or @ref DHCP_HTYPE100MB
+	uint8_t  hlen;          ///< @ref DHCP_HLENETHERNET
+	uint8_t  hops;          ///< @ref DHCP_HOPS
+	uint32_t xid;           ///< @ref DHCP_XID  This increase one every DHCP transaction.
+	uint16_t secs;          ///< @ref DHCP_SECS
+	uint16_t flags;         ///< @ref DHCP_FLAGSBROADCAST or @ref DHCP_FLAGSUNICAST
+	uint8_t  ciaddr[4];     ///< @ref Request IP to DHCP sever
+	uint8_t  yiaddr[4];     ///< @ref Offered IP from DHCP server
+	uint8_t  siaddr[4];     ///< No use
+	uint8_t  giaddr[4];     ///< No use
+	uint8_t  chaddr[16];    ///< DHCP client 6bytes MAC address. Others is filled to zero
+	uint8_t  sname[64];     ///< No use
+	uint8_t  file[128];     ///< No use
+	uint8_t  OPT[OPT_SIZE]; ///< Option
+} RIP_MSG;
 
 /*
  * @brief DHCP client initialization (outside of the main loop)
